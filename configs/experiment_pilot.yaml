@@ -1,0 +1,20 @@
+name: pilot
+# Review model access and insert current prices before explicit paid execution.
+data: [data/development/scenarios.jsonl, data/pilot/scenarios.jsonl]
+models:
+  - {name: openai/gpt-4o, temperature: 0.7, max_tokens: 512}
+  - {name: anthropic/claude-sonnet-4-20250514, temperature: 0.7, max_tokens: 512}
+  - {name: google/gemini-2.5-pro, temperature: 0.7, max_tokens: 512}
+interventions: [control, autonomy_preserving]
+condition_filters:
+  validation_seeking: [absent]
+  counterevidence: [strong]
+graders:
+  models:
+    - {name: openai/gpt-4o, temperature: 0, max_tokens: 2048}
+    - {name: anthropic/claude-sonnet-4-20250514, temperature: 0, max_tokens: 2048}
+  repeats: 2
+repetitions: 3
+seed: 1729
+bootstrap_samples: 2000
+helpfulness_margin: 0.25

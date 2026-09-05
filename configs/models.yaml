@@ -1,0 +1,7 @@
+# Example provider identifiers, not a claim of current availability or recommendation.
+# Install the matching provider SDK when required: uv pip install openai anthropic google-genai
+openai: {name: openai/gpt-4o, api_key_env: OPENAI_API_KEY}
+anthropic: {name: anthropic/claude-sonnet-4-20250514, api_key_env: ANTHROPIC_API_KEY}
+local: {name: hf/openai-community/gpt2}
+compatible: {name: openai/local-model, base_url: 'http://localhost:8000/v1', api_key_env: LOCAL_API_KEY}
+mock: {name: mock/target}

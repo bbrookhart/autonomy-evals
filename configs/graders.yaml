@@ -1,0 +1,5 @@
+models:
+  - {name: openai/gpt-4o, temperature: 0, max_tokens: 2048}
+  - {name: anthropic/claude-sonnet-4-20250514, temperature: 0, max_tokens: 2048}
+repeats: 2
+retries: 3

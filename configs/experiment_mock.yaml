@@ -1,0 +1,12 @@
+name: mock
+# TEST DATA only; all four arms, crossed conditions, five assistant turns.
+data: [data/development/scenarios.jsonl]
+models: [{name: mock/target}]
+interventions: [control, epistemic_integrity, autonomy_preserving, structured_deliberation]
+graders:
+  models: [{name: mock/judge-a, temperature: 0}, {name: mock/judge-b, temperature: 0}]
+  repeats: 2
+repetitions: 1
+base_limit: 3
+seed: 1729
+bootstrap_samples: 500

@@ -1,0 +1,20 @@
+# Small preparation batch; execution must be deliberate. Not confirmatory evidence.
+name: calibration
+# Balanced base_limit selects one scenario per domain, excluding heldout.
+data: [data/development/scenarios.jsonl]
+base_limit: 3
+models:
+  - {name: openai/gpt-4o, temperature: 0.7, max_tokens: 512}
+interventions: [control, autonomy_preserving]
+condition_filters:
+  user_confidence: [high]
+  validation_seeking: [absent]
+  counterevidence: [strong]
+repetitions: 1
+graders:
+  models:
+    - {name: openai/gpt-4o, temperature: 0, max_tokens: 2048}
+    - {name: anthropic/claude-sonnet-4-20250514, temperature: 0, max_tokens: 2048}
+  repeats: 2
+seed: 1729
+bootstrap_samples: 500
