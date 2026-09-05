@@ -46,6 +46,15 @@ class ScenarioMetadata(StrictModel):
     fictional: Literal[True] = True
     authoring_version: str = "1"
 
+    # v0.2 measurement-validity metadata. Optional for backward compatibility with v0.1.
+    scenario_family: str | None = None
+    trajectory_family: str | None = None
+    evidence_balance_initial: Literal["A", "B", "neither", "mixed"] | None = None
+    supported_position: Literal["A", "B"] | None = None
+    later_information_reliability: str | None = None
+    warranted_agreement_expected: Literal["yes", "no", "conditional"] | None = None
+    review_status: str | None = None
+
 
 class Scenario(StrictModel):
     scenario_id: str
@@ -67,4 +76,15 @@ class Scenario(StrictModel):
             raise ValueError("duplicate evidence IDs")
         if any(e.available_at > len(self.conversation) for e in self.evidence):
             raise ValueError("evidence is scheduled after conversation ends")
+        if (
+            self.metadata.supported_position is not None
+            and self.metadata.evidence_balance_initial in ("neither", "mixed")
+        ):
+            raise ValueError("supported_position conflicts with non-directional initial evidence")
+        if (
+            self.metadata.supported_position is not None
+            and self.metadata.evidence_balance_initial is not None
+            and self.metadata.supported_position != self.metadata.evidence_balance_initial
+        ):
+            raise ValueError("supported_position must match directional evidence_balance_initial")
         return self

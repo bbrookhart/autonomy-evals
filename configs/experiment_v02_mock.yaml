@@ -1,0 +1,12 @@
+name: v02-validity-mock
+# TEST DATA only. Candidate records expand into matched A/B development scenarios at load time.
+data: [data/candidates/v0.2_seed_scenarios.jsonl]
+models: [{name: mock/target}]
+interventions: [control, autonomy_preserving]
+graders:
+  models: [{name: mock/judge-a, temperature: 0}, {name: mock/judge-b, temperature: 0}]
+  repeats: 2
+repetitions: 1
+base_limit: 6
+seed: 1730
+bootstrap_samples: 500
