@@ -9,6 +9,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from autonomy_evals.budget import BudgetLedger, conservative_call_cost_usd
 from autonomy_evals.conversations.models import make_model
 from autonomy_evals.conversations.state import render_turn
 from autonomy_evals.datasets.loader import load
@@ -126,8 +127,26 @@ def source_fingerprint():
     return digest({str(p.relative_to(root)): p.read_text() for p in sorted(root.rglob("*.py"))})
 
 
-async def run(config_path: str, run_id: str | None = None) -> Path:
+def _record_error(folder: Path, transcript: Transcript, path: Path, tid: str, error: dict) -> None:
+    transcript.errors.append(error)
+    with (folder / "events.jsonl").open("a") as log:
+        import json
+
+        log.write(json.dumps({"transcript_id": tid, **error}) + "\n")
+    atomic_json(path, transcript.model_dump())
+
+
+async def run(
+    config_path: str,
+    run_id: str | None = None,
+    *,
+    max_cost_usd: float | None = None,
+) -> Path:
     config, scenarios, prompts = prepare(config_path)
+    planned_estimate = estimate(config, scenarios, prompts)
+    remote_targets = [model for model in config.models if not model.name.startswith("mock/")]
+    if remote_targets and max_cost_usd is None:
+        raise ValueError("non-mock run requires an explicit max_cost_usd authorization")
     spec = {
         "config": config.model_dump(),
         "scenarios": [s.model_dump() for s in scenarios],
@@ -140,6 +159,13 @@ async def run(config_path: str, run_id: str | None = None) -> Path:
         raise ValueError("run ID must be a single directory name")
     folder = Path(config.output_dir) / run_id
     folder.mkdir(parents=True, exist_ok=True)
+    budget = None
+    if remote_targets:
+        budget = BudgetLedger.open(
+            folder,
+            authorized_cap_usd=float(max_cost_usd),
+            estimated_total_usd=planned_estimate["estimated_total_usd"],
+        )
     lock = folder / ".lock"
     try:
         lock.touch(exist_ok=False)
@@ -172,7 +198,15 @@ async def run(config_path: str, run_id: str | None = None) -> Path:
                     )
                 },
                 "test_data": all(m.name.startswith("mock/") for m in config.models),
-                "estimate": estimate(config, scenarios, prompts),
+                "estimate": planned_estimate,
+                "budget_authorization": (
+                    {
+                        "max_cost_usd": budget.authorized_cap_usd,
+                        "ledger": "budget.json",
+                    }
+                    if budget
+                    else None
+                ),
             }
             atomic_json(manifest_path, manifest)
         for s, model_spec, arm, repetition in itertools.product(
@@ -205,57 +239,78 @@ async def run(config_path: str, run_id: str | None = None) -> Path:
                 messages = transcript.messages + [
                     Message(role="user", content=render_turn(s, index))
                 ]
+                generated = False
                 for attempt in range(config.retries):
+                    call_id = f"target:{tid}:turn-{index}:attempt-{attempt + 1}"
+                    if budget and not transcript.test_data:
+                        budget.reserve(
+                            call_id,
+                            kind="target",
+                            maximum_cost_usd=conservative_call_cost_usd(
+                                [message.content for message in messages],
+                                max_output_tokens=model_spec.max_tokens,
+                                input_per_million=model_spec.input_per_million,
+                                output_per_million=model_spec.output_per_million,
+                            ),
+                        )
                     started = time.perf_counter()
                     try:
                         response = await model.generate(messages, transcript.seed + index)
-                        if not response.text.strip():
-                            raise ValueError("empty model completion")
-                        cost = 0.0 if transcript.test_data else None
-                        if (
-                            model_spec.input_per_million is not None
-                            and model_spec.output_per_million is not None
-                            and response.input_tokens is not None
-                            and response.output_tokens is not None
-                        ):
-                            cost = (
-                                response.input_tokens * model_spec.input_per_million
-                                + response.output_tokens * model_spec.output_per_million
-                            ) / 1e6
-                        transcript.generations.append(
-                            Generation(
-                                turn=index,
-                                text=response.text,
-                                latency=time.perf_counter() - started,
-                                timestamp=now(),
-                                input_tokens=response.input_tokens,
-                                output_tokens=response.output_tokens,
-                                cost_usd=cost,
-                                raw=response.raw,
-                            )
-                        )
-                        transcript.messages = messages + [
-                            Message(role="assistant", content=response.text)
-                        ]
-                        atomic_json(path, transcript.model_dump())
-                        break
                     except Exception as exc:
-                        # Avoid logging provider exceptions that can contain credential-bearing URLs.
+                        if budget and not transcript.test_data:
+                            budget.settle(call_id, None)
                         error = {
                             "turn": index,
                             "attempt": attempt + 1,
                             "type": type(exc).__name__,
                             "at": now(),
                         }
-                        transcript.errors.append(error)
-                        with (folder / "events.jsonl").open("a") as log:
-                            import json
-
-                            log.write(json.dumps({"transcript_id": tid, **error}) + "\n")
-                        atomic_json(path, transcript.model_dump())
+                        _record_error(folder, transcript, path, tid, error)
                         if attempt + 1 < config.retries:
                             await asyncio.sleep(config.retry_backoff * 2**attempt)
-                else:
+                        continue
+
+                    cost = 0.0 if transcript.test_data else None
+                    if (
+                        model_spec.input_per_million is not None
+                        and model_spec.output_per_million is not None
+                        and response.input_tokens is not None
+                        and response.output_tokens is not None
+                    ):
+                        cost = (
+                            response.input_tokens * model_spec.input_per_million
+                            + response.output_tokens * model_spec.output_per_million
+                        ) / 1e6
+                    if budget and not transcript.test_data:
+                        budget.settle(call_id, cost)
+                    if not response.text.strip():
+                        error = {
+                            "turn": index,
+                            "attempt": attempt + 1,
+                            "type": "ValueError",
+                            "at": now(),
+                        }
+                        _record_error(folder, transcript, path, tid, error)
+                        if attempt + 1 < config.retries:
+                            await asyncio.sleep(config.retry_backoff * 2**attempt)
+                        continue
+                    transcript.generations.append(
+                        Generation(
+                            turn=index,
+                            text=response.text,
+                            latency=time.perf_counter() - started,
+                            timestamp=now(),
+                            input_tokens=response.input_tokens,
+                            output_tokens=response.output_tokens,
+                            cost_usd=cost,
+                            raw=response.raw,
+                        )
+                    )
+                    transcript.messages = messages + [Message(role="assistant", content=response.text)]
+                    atomic_json(path, transcript.model_dump())
+                    generated = True
+                    break
+                if not generated:
                     transcript.status = "failed"
                     atomic_json(path, transcript.model_dump())
                     break
@@ -280,7 +335,11 @@ async def run(config_path: str, run_id: str | None = None) -> Path:
                 ),
                 "known_target_cost_usd": sum(g.cost_usd or 0 for g in generations),
                 "unknown_cost_generations": sum(g.cost_usd is None for g in generations),
-                "note": "Failed request billing may be unavailable; judge usage recorded separately.",
+                "budget_ledger": "budget.json" if budget else None,
+                "note": (
+                    "Failed request billing may be unavailable; unknown paid attempts retain their "
+                    "full pre-call authorization reservation in budget.json. Judge usage is recorded separately."
+                ),
             },
         )
         with (folder / "events.jsonl").open("a") as log:
